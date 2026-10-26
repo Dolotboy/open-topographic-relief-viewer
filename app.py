@@ -23,6 +23,7 @@ class ReliefApp:
         self.image: Image.Image | None = None
         self.color_image: Image.Image | None = None
         self.filename = ""
+        self.black_background = tk.BooleanVar(value=False)
         self.elevation = tk.DoubleVar(value=0.0)
         self.invert_elevation = tk.BooleanVar(value=False)
         self._build_ui()
@@ -39,6 +40,12 @@ class ReliefApp:
         header = ttk.Frame(outer)
         header.pack(fill="x", pady=(0, 12))
         ttk.Label(header, text="3D Relief from an Image", font=("TkDefaultFont", 18, "bold")).pack(side="left")
+        self.background_button = ttk.Button(
+            header,
+            text="Black background",
+            command=self._toggle_background,
+        )
+        self.background_button.pack(side="right", padx=(0, 8))
         ttk.Button(header, text="Choose an image…", command=self.open_image).pack(side="right")
         controls = ttk.Frame(outer)
         controls.pack(fill="x", pady=(0, 10))
@@ -61,6 +68,31 @@ class ReliefApp:
         self.canvas = FigureCanvasTkAgg(self.fig, master=outer)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
         ttk.Label(outer, text="Tip: drag the mouse over the surface to rotate it.", foreground="#666").pack(anchor="w", pady=(8, 0))
+
+    def _toggle_background(self) -> None:
+        use_black = not self.black_background.get()
+        self.black_background.set(use_black)
+        self.background_button.configure(
+            text="Light background" if use_black else "Black background"
+        )
+        if self.image is None:
+            self._draw_empty()
+        else:
+            self._render_surface()
+
+    def _apply_plot_background(self) -> None:
+        background = "#000000" if self.black_background.get() else "#f5f7fa"
+        self.fig.set_facecolor(background)
+        self.ax.set_facecolor(background)
+        if self.black_background.get():
+            for axis in (self.ax.xaxis, self.ax.yaxis, self.ax.zaxis):
+                axis.set_pane_color("#000000")
+                axis.pane.set_edgecolor("#ffffff")
+                axis.label.set_color("#ffffff")
+            self.ax.tick_params(axis="x", colors="#ffffff")
+            self.ax.tick_params(axis="y", colors="#ffffff")
+            self.ax.tick_params(axis="z", colors="#ffffff")
+            self.ax.title.set_color("#ffffff")
 
     def open_image(self) -> None:
         path = filedialog.askopenfilename(
@@ -100,8 +132,9 @@ class ReliefApp:
 
     def _draw_empty(self) -> None:
         self.ax.clear()
-        self.ax.set_facecolor("#f5f7fa")
-        self.ax.text2D(0.5, 0.53, "Choose an image to create a 3D relief", transform=self.ax.transAxes, ha="center", color="#526174", fontsize=14)
+        self._apply_plot_background()
+        text_color = "#ffffff" if self.black_background.get() else "#526174"
+        self.ax.text2D(0.5, 0.53, "Choose an image to create a 3D relief", transform=self.ax.transAxes, ha="center", color=text_color, fontsize=14)
         self.ax.set_axis_off()
         self.canvas.draw_idle()
 
@@ -128,7 +161,7 @@ class ReliefApp:
         # plot_surface assigns one colour to each quad, so average its corners.
         facecolors = (colors[:-1, :-1] + colors[1:, :-1] + colors[:-1, 1:] + colors[1:, 1:]) / 4
         self.ax.clear()
-        self.ax.set_facecolor("#f5f7fa")
+        self._apply_plot_background()
         self.ax.plot_surface(X, Y, Z, facecolors=facecolors, rstride=1, cstride=1, linewidth=0, antialiased=True, shade=False)
         self.ax.set_xlabel("X")
         self.ax.set_ylabel("Y")
