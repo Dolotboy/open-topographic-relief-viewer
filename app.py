@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageFilter, ImageOps
+from scipy import ndimage
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
@@ -29,6 +30,10 @@ class ReliefApp:
         self.contour_color: tuple[int, int, int] | None = None
         self.contour_interval: float | None = None
         self.contour_tolerance = tk.IntVar(value=35)
+        self.contour_components: list[tuple[np.ndarray, np.ndarray]] = []
+        self.selected_contour_index = 0
+        self.manual_contour_values: dict[int, float] = {}
+        self._updating_manual_value = False
         self._build_ui()
         self._draw_empty()
 
@@ -74,6 +79,22 @@ class ReliefApp:
         self.tolerance_label.pack(side="left")
         self.contour_label = ttk.Label(contour, text="No color selected; using image brightness")
         self.contour_label.pack(anchor="w", pady=(5, 0))
+        manual = ttk.LabelFrame(outer, text="Manual contour altitude", padding=(8, 5))
+        manual.pack(fill="x", pady=(0, 8))
+        self.previous_contour_button = ttk.Button(manual, text="◀", width=3, command=self._previous_contour)
+        self.previous_contour_button.pack(side="left")
+        self.contour_counter = ttk.Label(manual, text="0 / 0", width=9, anchor="center")
+        self.contour_counter.pack(side="left", padx=5)
+        self.next_contour_button = ttk.Button(manual, text="▶", width=3, command=self._next_contour)
+        self.next_contour_button.pack(side="left")
+        ttk.Label(manual, text="Altitude (m)").pack(side="left", padx=(14, 5))
+        self.manual_value_var = tk.StringVar()
+        self.manual_value_entry = ttk.Entry(manual, textvariable=self.manual_value_var, width=12)
+        self.manual_value_entry.pack(side="left")
+        self.manual_value_var.trace_add("write", self._manual_value_changed)
+        self.manual_status = ttk.Label(manual, text="Choose a contour color to detect lines", foreground="#666")
+        self.manual_status.pack(side="left", padx=10)
+        self._update_manual_controls()
         self.file_label = ttk.Label(outer, text="No image selected", foreground="#666")
         self.file_label.pack(anchor="w", pady=(0, 6))
         self.fig = Figure(figsize=(8, 6), dpi=100, facecolor="#f5f7fa")
@@ -169,6 +190,9 @@ class ReliefApp:
                 self.image = ImageOps.grayscale(flattened).copy()
                 self.color_image = flattened.copy()
             self.filename = path
+            self.manual_contour_values.clear()
+            self.selected_contour_index = 0
+            self._refresh_contour_components()
             # A supplied contour interval should have a visible effect on load.
             # Blank intervals retain the original flat-on-load behavior.
             initial_elevation = 1.0 if self.contour_interval is not None else 0.0
@@ -187,6 +211,9 @@ class ReliefApp:
         self.contour_button.configure(text=f"Contour color: {result[1]}")
         self.contour_label.configure(text="Selected pixels define the contour distance field")
         if self.image is not None:
+            self.manual_contour_values.clear()
+            self.selected_contour_index = 0
+            self._refresh_contour_components()
             self._render_surface()
 
     def _tolerance_changed(self, _value: str) -> None:
@@ -194,7 +221,122 @@ class ReliefApp:
         self.contour_tolerance.set(tolerance)
         self.tolerance_label.configure(text=str(tolerance))
         if self.image is not None and self.contour_color is not None:
+            self._refresh_contour_components()
             self._render_surface()
+
+    def _refresh_contour_components(self) -> None:
+        previous_count = len(self.contour_components)
+        self.contour_components = []
+        if self.color_image is not None and self.contour_color is not None:
+            rgb = np.asarray(self.color_image, dtype=np.float32)
+            target = np.asarray(self.contour_color, dtype=np.float32)
+            mask = np.linalg.norm(rgb - target, axis=2) <= max(1, self.contour_tolerance.get())
+            # Bridge short breaks where labels or screenshot artifacts cover a line.
+            mask = ndimage.binary_closing(mask, structure=np.ones((9, 3), dtype=bool))
+            labels, _ = ndimage.label(mask, structure=np.ones((3, 3), dtype=bool))
+            components: list[tuple[float, float, tuple[np.ndarray, np.ndarray]]] = []
+            for label_id, bounds in enumerate(ndimage.find_objects(labels), start=1):
+                if bounds is None:
+                    continue
+                ys, xs = np.where(labels[bounds] == label_id)
+                if len(xs) < 12:
+                    continue
+                ys = ys + bounds[0].start
+                xs = xs + bounds[1].start
+                components.append((float(np.median(xs)), float(np.median(ys)),
+                                   (ys.astype(np.int32), xs.astype(np.int32))))
+            components.sort(key=lambda component: (component[0], component[1]))
+            self.contour_components = [component[2] for component in components]
+        if previous_count and len(self.contour_components) != previous_count:
+            self.manual_contour_values.clear()
+        if self.contour_components:
+            self.selected_contour_index = min(self.selected_contour_index, len(self.contour_components) - 1)
+        else:
+            self.selected_contour_index = 0
+        self._update_manual_controls()
+
+    def _update_manual_controls(self) -> None:
+        count = len(self.contour_components)
+        active = count > 0
+        self.contour_counter.configure(text=f"{self.selected_contour_index + 1} / {count}" if active else "0 / 0")
+        state = "normal" if active else "disabled"
+        self.previous_contour_button.configure(state=state)
+        self.next_contour_button.configure(state=state)
+        self.manual_value_entry.configure(state=state)
+        self.manual_status.configure(text=("Unassigned; interpolated from neighboring lines" if active and self.selected_contour_index + 1 not in self.manual_contour_values else ("Altitude assigned" if active else "Choose a contour color to detect lines")))
+        self._updating_manual_value = True
+        value = self.manual_contour_values.get(self.selected_contour_index + 1)
+        self.manual_value_var.set("" if value is None else f"{value:g}")
+        self._updating_manual_value = False
+
+    def _previous_contour(self) -> None:
+        if self.contour_components:
+            self.selected_contour_index = (self.selected_contour_index - 1) % len(self.contour_components)
+            self._update_manual_controls()
+
+    def _next_contour(self) -> None:
+        if self.contour_components:
+            self.selected_contour_index = (self.selected_contour_index + 1) % len(self.contour_components)
+            self._update_manual_controls()
+
+    def _manual_value_changed(self, *_args: object) -> None:
+        if self._updating_manual_value or not self.contour_components:
+            return
+        key = self.selected_contour_index + 1
+        text = self.manual_value_var.get().strip().replace(",", ".")
+        if not text:
+            self.manual_contour_values.pop(key, None)
+        else:
+            try:
+                value = float(text)
+                if not np.isfinite(value):
+                    return
+                self.manual_contour_values[key] = value
+                if self.elevation.get() == 0:
+                    self.elevation.set(1.0)
+                    self.value_label.configure(text="1.00×")
+            except ValueError:
+                return
+        self.contour_counter.configure(text=f"{self.selected_contour_index + 1} / {len(self.contour_components)}" if self.contour_components else "0 / 0")
+        self.manual_status.configure(text=("Unassigned; interpolated from neighboring lines" if self.contour_components and self.selected_contour_index + 1 not in self.manual_contour_values else ("Altitude assigned" if self.contour_components else "Choose a contour color to detect lines")))
+        if self.image is not None:
+            self._render_surface()
+
+    def _interpolate_manual_contours(self, shape: tuple[int, int]) -> np.ndarray | None:
+        if not self.contour_components or not self.manual_contour_values:
+            return None
+        height, width = shape
+        count = len(self.contour_components)
+        known_indices = np.asarray(sorted(self.manual_contour_values), dtype=np.float32)
+        known_values = np.asarray([self.manual_contour_values[int(i)] for i in known_indices], dtype=np.float32)
+        line_values = np.interp(np.arange(1, count + 1), known_indices, known_values)
+        positions = np.empty((count, height), dtype=np.float32)
+        source_height, source_width = self.color_image.size[1], self.color_image.size[0]
+        for i, (source_ys, source_xs) in enumerate(self.contour_components):
+            ys = np.rint(source_ys * (height - 1) / max(1, source_height - 1)).astype(np.int32)
+            xs = np.rint(source_xs * (width - 1) / max(1, source_width - 1)).astype(np.int32)
+            unique_y = np.unique(ys)
+            median_x = np.asarray([np.median(xs[ys == row]) for row in unique_y], dtype=np.float32)
+            positions[i] = np.interp(np.arange(height), unique_y, median_x)
+        surface = np.zeros((height, width), dtype=np.float32)
+        x_coords = np.arange(width, dtype=np.float32)
+        for row in range(height):
+            order = np.argsort(positions[:, row])
+            anchors_x = positions[order, row]
+            anchors_z = line_values[order]
+            unique_x, inverse = np.unique(np.round(anchors_x, 1), return_inverse=True)
+            if len(unique_x) < 2:
+                surface[row, :] = float(anchors_z[0])
+                continue
+            sums = np.bincount(inverse, weights=anchors_z)
+            counts = np.bincount(inverse)
+            surface[row] = np.interp(x_coords, unique_x, sums / counts)
+        low, high = float(np.min(line_values)), float(np.max(line_values))
+        if high > low:
+            surface = (surface - low) / (high - low)
+        else:
+            surface.fill(0.5)
+        return ndimage.gaussian_filter(surface, sigma=(0.8, 0.5)).astype(np.float32)
 
     @staticmethod
     def _distance_from_lines(mask: np.ndarray) -> np.ndarray:
@@ -246,7 +388,15 @@ class ReliefApp:
         assert self.image is not None
         im = self.image.copy()
         im.thumbnail((self.MAX_SIDE, self.MAX_SIDE), Image.Resampling.LANCZOS)
-        if self.contour_color is None:
+        manual_surface = None
+        if self.contour_color is not None and self.manual_contour_values:
+            # Map manually supplied line elevations continuously between curves.
+            rgb_small = self.color_image.copy()
+            rgb_small.thumbnail((self.MAX_SIDE, self.MAX_SIDE), Image.Resampling.LANCZOS)
+            manual_surface = self._interpolate_manual_contours(np.asarray(rgb_small).shape[:2])
+        if manual_surface is not None:
+            pixels = manual_surface
+        elif self.contour_color is None:
             # Preserve the original brightness-based behavior unless a color is selected.
             smooth_height = im.filter(ImageFilter.GaussianBlur(self.HEIGHT_SMOOTHING))
             pixels = np.asarray(smooth_height, dtype=np.float32) / 255.0
@@ -279,7 +429,11 @@ class ReliefApp:
         height_map = 1.0 - pixels if self.invert_elevation.get() else pixels
         # Keep the image-size based relief scale, then calibrate it by the
         # supplied contour interval (the same multiplier works in either mode).
-        vertical_unit = self.contour_interval or 1.0
+        if manual_surface is not None:
+            vertical_unit = max(self.manual_contour_values.values()) - min(self.manual_contour_values.values())
+            vertical_unit = vertical_unit or 1.0
+        else:
+            vertical_unit = self.contour_interval or 1.0
         Z = height_map * self.elevation.get() * min(width, height) * 0.02 * vertical_unit
         # plot_surface assigns one colour to each quad, so average its corners.
         facecolors = (colors[:-1, :-1] + colors[1:, :-1] + colors[:-1, 1:] + colors[1:, 1:]) / 4
