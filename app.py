@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +26,9 @@ class ReliefApp:
         self.black_background = tk.BooleanVar(value=False)
         self.elevation = tk.DoubleVar(value=0.0)
         self.invert_elevation = tk.BooleanVar(value=False)
+        self.contour_color: tuple[int, int, int] | None = None
+        self.contour_interval: float | None = None
+        self.contour_tolerance = tk.IntVar(value=35)
         self._build_ui()
         self._draw_empty()
 
@@ -60,6 +63,17 @@ class ReliefApp:
             variable=self.invert_elevation,
             command=self._invert_changed,
         ).pack(anchor="w", pady=(0, 8))
+        contour = ttk.LabelFrame(outer, text="Contour-line detection (optional)", padding=(8, 5))
+        contour.pack(fill="x", pady=(0, 8))
+        self.contour_button = ttk.Button(contour, text="Choose contour color…", command=self._choose_contour_color)
+        self.contour_button.pack(side="left")
+        ttk.Label(contour, text="Color tolerance").pack(side="left", padx=(12, 4))
+        self.tolerance_slider = ttk.Scale(contour, from_=0, to=150, variable=self.contour_tolerance, command=self._tolerance_changed)
+        self.tolerance_slider.pack(side="left", fill="x", expand=True, padx=4)
+        self.tolerance_label = ttk.Label(contour, text="35", width=4, anchor="e")
+        self.tolerance_label.pack(side="left")
+        self.contour_label = ttk.Label(contour, text="No color selected; using image brightness")
+        self.contour_label.pack(anchor="w", pady=(5, 0))
         self.file_label = ttk.Label(outer, text="No image selected", foreground="#666")
         self.file_label.pack(anchor="w", pady=(0, 6))
         self.fig = Figure(figsize=(8, 6), dpi=100, facecolor="#f5f7fa")
@@ -67,7 +81,30 @@ class ReliefApp:
         self.fig.subplots_adjust(left=0.02, right=0.98, bottom=0.03, top=0.96)
         self.canvas = FigureCanvasTkAgg(self.fig, master=outer)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
-        ttk.Label(outer, text="Tip: drag the mouse over the surface to rotate it.", foreground="#666").pack(anchor="w", pady=(8, 0))
+        canvas_widget = self.canvas.get_tk_widget()
+        canvas_widget.bind("<MouseWheel>", self._zoom_with_wheel)
+        canvas_widget.bind("<Button-4>", self._zoom_with_wheel)
+        canvas_widget.bind("<Button-5>", self._zoom_with_wheel)
+        ttk.Label(outer, text="Tip: drag to rotate; use the mouse wheel to zoom.", foreground="#666").pack(anchor="w", pady=(8, 0))
+
+    def _zoom_with_wheel(self, event) -> None:
+        if self.image is None:
+            return
+        delta = getattr(event, "delta", 0)
+        direction = 1 if delta > 0 or getattr(event, "num", None) == 4 else -1
+        if not delta and getattr(event, "num", None) not in (4, 5):
+            return
+        factor = 0.85 if direction > 0 else 1 / 0.85
+        for get_limits, set_limits in (
+            (self.ax.get_xlim3d, self.ax.set_xlim3d),
+            (self.ax.get_ylim3d, self.ax.set_ylim3d),
+            (self.ax.get_zlim3d, self.ax.set_zlim3d),
+        ):
+            low, high = get_limits()
+            center = (low + high) / 2
+            half_range = (high - low) * factor / 2
+            set_limits(center - half_range, center + half_range)
+        self.canvas.draw_idle()
 
     def _toggle_background(self) -> None:
         use_black = not self.black_background.get()
@@ -101,6 +138,26 @@ class ReliefApp:
         )
         if not path:
             return
+        interval = simpledialog.askstring(
+            "Contour interval",
+            "Vertical contour interval in meters (for example, 1 or 5).\n"
+            "Leave blank if unknown. This is the elevation difference between adjacent contour lines.",
+            parent=self.root,
+        )
+        if interval is None:
+            return
+        interval = interval.strip()
+        if interval:
+            try:
+                self.contour_interval = float(interval.replace(",", "."))
+                if self.contour_interval <= 0:
+                    raise ValueError
+            except ValueError:
+                self.contour_interval = None
+                messagebox.showerror("Invalid contour interval", "Enter a positive number or leave the field blank.", parent=self.root)
+                return
+        else:
+            self.contour_interval = None
         try:
             with Image.open(path) as source:
                 # Flatten transparency onto white before deriving heights.
@@ -112,13 +169,60 @@ class ReliefApp:
                 self.image = ImageOps.grayscale(flattened).copy()
                 self.color_image = flattened.copy()
             self.filename = path
-            # Every newly loaded map starts as a flat, textured plane.
-            self.elevation.set(0.0)
-            self.value_label.configure(text="0.00×")
+            # A supplied contour interval should have a visible effect on load.
+            # Blank intervals retain the original flat-on-load behavior.
+            initial_elevation = 1.0 if self.contour_interval is not None else 0.0
+            self.elevation.set(initial_elevation)
+            self.value_label.configure(text=f"{initial_elevation:.2f}×")
             self.file_label.configure(text=f"{Path(path).name}  ·  {self.image.width} × {self.image.height} px")
             self._render_surface()
         except (OSError, ValueError) as exc:
             messagebox.showerror("Could not open image", str(exc), parent=self.root)
+
+    def _choose_contour_color(self) -> None:
+        result = colorchooser.askcolor(title="Choose the contour-line color", parent=self.root)
+        if result[0] is None:
+            return
+        self.contour_color = tuple(int(round(channel)) for channel in result[0])
+        self.contour_button.configure(text=f"Contour color: {result[1]}")
+        self.contour_label.configure(text="Selected pixels define the contour distance field")
+        if self.image is not None:
+            self._render_surface()
+
+    def _tolerance_changed(self, _value: str) -> None:
+        tolerance = int(round(self.contour_tolerance.get()))
+        self.contour_tolerance.set(tolerance)
+        self.tolerance_label.configure(text=str(tolerance))
+        if self.image is not None and self.contour_color is not None:
+            self._render_surface()
+
+    @staticmethod
+    def _distance_from_lines(mask: np.ndarray) -> np.ndarray:
+        """Approximate Euclidean distance to selected pixels with a chamfer pass."""
+        h, w = mask.shape
+        distance = np.where(mask, 0.0, float(h + w)).astype(np.float32)
+        diagonal = np.float32(1.41421356)
+        for y in range(h):
+            for x in range(w):
+                if y:
+                    distance[y, x] = min(distance[y, x], distance[y - 1, x] + 1)
+                    if x:
+                        distance[y, x] = min(distance[y, x], distance[y - 1, x - 1] + diagonal)
+                    if x + 1 < w:
+                        distance[y, x] = min(distance[y, x], distance[y - 1, x + 1] + diagonal)
+                if x:
+                    distance[y, x] = min(distance[y, x], distance[y, x - 1] + 1)
+        for y in range(h - 1, -1, -1):
+            for x in range(w - 1, -1, -1):
+                if y + 1 < h:
+                    distance[y, x] = min(distance[y, x], distance[y + 1, x] + 1)
+                    if x:
+                        distance[y, x] = min(distance[y, x], distance[y + 1, x - 1] + diagonal)
+                    if x + 1 < w:
+                        distance[y, x] = min(distance[y, x], distance[y + 1, x + 1] + diagonal)
+                if x + 1 < w:
+                    distance[y, x] = min(distance[y, x], distance[y, x + 1] + 1)
+        return distance
 
     def _slider_changed(self, _value: str) -> None:
         value = self.elevation.get()
@@ -142,10 +246,26 @@ class ReliefApp:
         assert self.image is not None
         im = self.image.copy()
         im.thumbnail((self.MAX_SIDE, self.MAX_SIDE), Image.Resampling.LANCZOS)
-        # Contour strokes are sharp and narrow; blur the height field so they
-        # blend into the surrounding terrain instead of becoming raised ridges.
-        smooth_height = im.filter(ImageFilter.GaussianBlur(self.HEIGHT_SMOOTHING))
-        pixels = np.asarray(smooth_height, dtype=np.float32) / 255.0
+        if self.contour_color is None:
+            # Preserve the original brightness-based behavior unless a color is selected.
+            smooth_height = im.filter(ImageFilter.GaussianBlur(self.HEIGHT_SMOOTHING))
+            pixels = np.asarray(smooth_height, dtype=np.float32) / 255.0
+        else:
+            assert self.color_image is not None
+            rgb_small = self.color_image.copy()
+            rgb_small.thumbnail((self.MAX_SIDE, self.MAX_SIDE), Image.Resampling.LANCZOS)
+            rgb_array = np.asarray(rgb_small, dtype=np.int16)
+            target = np.asarray(self.contour_color, dtype=np.int16)
+            delta = rgb_array - target
+            selected = np.sum(delta * delta, axis=2) <= self.contour_tolerance.get() ** 2
+            if not selected.any():
+                messagebox.showwarning("No contour pixels found", "Try a higher color tolerance or choose a color present in the image.", parent=self.root)
+                return
+            distances = self._distance_from_lines(selected)
+            distance_scale = max(1.0, float(np.percentile(distances, 95)))
+            distance_image = Image.fromarray(np.clip(distances / distance_scale * 255, 0, 255).astype(np.uint8))
+            smooth_height = distance_image.filter(ImageFilter.GaussianBlur(self.HEIGHT_SMOOTHING))
+            pixels = np.asarray(smooth_height, dtype=np.float32) / 255.0
         # Keep the map's original colours on the mesh; luminance drives height.
         assert self.color_image is not None
         rgb = self.color_image.copy()
@@ -157,7 +277,10 @@ class ReliefApp:
         X, Y = np.meshgrid(x, y)
         # The slider controls vertical exaggeration relative to the map size.
         height_map = 1.0 - pixels if self.invert_elevation.get() else pixels
-        Z = height_map * self.elevation.get() * min(width, height) * 0.02
+        if self.contour_color is not None and self.contour_interval is not None:
+            Z = height_map * self.elevation.get() * self.contour_interval
+        else:
+            Z = height_map * self.elevation.get() * min(width, height) * 0.02
         # plot_surface assigns one colour to each quad, so average its corners.
         facecolors = (colors[:-1, :-1] + colors[1:, :-1] + colors[:-1, 1:] + colors[1:, 1:]) / 4
         self.ax.clear()
