@@ -23,16 +23,17 @@ DEFAULT_CONFIG = {
         "color_tolerance": 35,
         "color_tolerance_max": 150,
         "minimum_component_pixels": 12,
+        "minimum_contour_span_fraction": 0.12,
         "closing_size": 3,
-        "stitch_max_gap_px": 160,
+        "stitch_max_gap_px": 220,
         "stitch_residual_min_px": 8.0,
-        "stitch_residual_gap_ratio": 0.6,
-        "stitch_residual_extra_px": 5.0,
-        "stitch_max_slope_delta": 2.0,
-        "stitch_slope_weight": 2.0,
-        "stitch_gap_weight": 0.02,
+        "stitch_residual_gap_ratio": 0.85,
+        "stitch_residual_extra_px": 8.0,
+        "stitch_max_slope_delta": 3.0,
+        "stitch_slope_weight": 1.5,
+        "stitch_gap_weight": 0.01,
         "hue_tolerance_scale": 0.25,
-        "hue_tolerance_min": 0.025,
+        "hue_tolerance_min": 0.0,
         "hue_tolerance_max": 0.12,
         "minimum_saturation_target_fraction": 0.15,
         "minimum_saturation_floor": 0.08,
@@ -67,7 +68,7 @@ def load_config() -> dict:
     for key in ("minimum_component_pixels", "closing_size", "stitch_max_gap_px"):
         config["contours"][key] = max(1, int(config["contours"][key]))
     for key in (
-        "stitch_residual_min_px", "stitch_residual_gap_ratio", "stitch_residual_extra_px",
+        "minimum_contour_span_fraction", "stitch_residual_min_px", "stitch_residual_gap_ratio", "stitch_residual_extra_px",
         "stitch_max_slope_delta", "stitch_slope_weight", "stitch_gap_weight",
         "hue_tolerance_scale", "hue_tolerance_min", "hue_tolerance_max",
         "minimum_saturation_target_fraction", "minimum_saturation_floor",
@@ -405,6 +406,13 @@ class ReliefApp:
                 xs = xs + bounds[1].start
                 fragments.append((ys.astype(np.int32), xs.astype(np.int32)))
             self.contour_components = self._join_contour_fragments(fragments)
+            min_span = self.config["contours"]["minimum_contour_span_fraction"] * max(
+                self.color_image.width, self.color_image.height
+            )
+            self.contour_components = [
+                line for line in self.contour_components
+                if max(float(np.ptp(line[0])), float(np.ptp(line[1]))) >= min_span
+            ]
         line_count_changed = previous_count != len(self.contour_components)
         if previous_count and line_count_changed:
             self.manual_contour_values.clear()
