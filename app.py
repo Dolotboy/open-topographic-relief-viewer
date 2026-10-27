@@ -9,6 +9,7 @@ import numpy as np
 from PIL import Image, ImageFilter, ImageOps, ImageTk
 from scipy import ndimage
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.colors import rgb_to_hsv
 from matplotlib.figure import Figure
 
 
@@ -316,12 +317,12 @@ class ReliefApp:
         self.contour_components = []
         if self.color_image is not None and self.contour_color is not None:
             rgb = np.asarray(self.color_image, dtype=np.float32)
-            target = np.asarray(self.contour_color, dtype=np.float32)
-            mask = np.linalg.norm(rgb - target, axis=2) <= max(1, self.contour_tolerance.get())
-            # Bridge short breaks where labels or screenshot artifacts cover a line.
-            mask = ndimage.binary_closing(mask, structure=np.ones((9, 3), dtype=bool))
+            mask = self._contour_color_mask(rgb)
+            # Close only tiny raster gaps here. Longer breaks (often where
+            # elevation labels cover a contour) are linked by endpoint tracking below.
+            mask = ndimage.binary_closing(mask, structure=np.ones((3, 3), dtype=bool))
             labels, _ = ndimage.label(mask, structure=np.ones((3, 3), dtype=bool))
-            components: list[tuple[float, float, tuple[np.ndarray, np.ndarray]]] = []
+            fragments: list[tuple[np.ndarray, np.ndarray]] = []
             for label_id, bounds in enumerate(ndimage.find_objects(labels), start=1):
                 if bounds is None:
                     continue
@@ -330,10 +331,8 @@ class ReliefApp:
                     continue
                 ys = ys + bounds[0].start
                 xs = xs + bounds[1].start
-                components.append((float(np.median(xs)), float(np.median(ys)),
-                                   (ys.astype(np.int32), xs.astype(np.int32))))
-            components.sort(key=lambda component: (component[0], component[1]))
-            self.contour_components = [component[2] for component in components]
+                fragments.append((ys.astype(np.int32), xs.astype(np.int32)))
+            self.contour_components = self._join_contour_fragments(fragments)
         if previous_count and len(self.contour_components) != previous_count:
             self.manual_contour_values.clear()
         if self.contour_components:
@@ -341,6 +340,101 @@ class ReliefApp:
         else:
             self.selected_contour_index = 0
         self._update_manual_controls()
+
+    @staticmethod
+    def _join_contour_fragments(
+        fragments: list[tuple[np.ndarray, np.ndarray]],
+    ) -> list[tuple[np.ndarray, np.ndarray]]:
+        """Join broken contour segments when their nearby endpoints continue smoothly."""
+        if len(fragments) < 2:
+            return fragments
+
+        count = len(fragments)
+        parent = list(range(count))
+
+        def find(index: int) -> int:
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def union(first: int, second: int) -> None:
+            first_root, second_root = find(first), find(second)
+            if first_root != second_root:
+                parent[second_root] = first_root
+
+        bounds: list[tuple[int, int, float, float, float, float]] = []
+        for ys, xs in fragments:
+            order = np.argsort(ys, kind="stable")
+            sorted_y, sorted_x = ys[order], xs[order]
+            unique_y, inverse = np.unique(sorted_y, return_inverse=True)
+            row_x = np.asarray([np.median(sorted_x[inverse == row]) for row in range(len(unique_y))])
+            first_count = max(1, min(len(unique_y), 12))
+            last_count = first_count
+            first_slope = float(np.polyfit(unique_y[:first_count], row_x[:first_count], 1)[0]) if first_count > 1 else 0.0
+            last_slope = float(np.polyfit(unique_y[-last_count:], row_x[-last_count:], 1)[0]) if last_count > 1 else 0.0
+            bounds.append((
+                int(unique_y[0]),
+                int(unique_y[-1]),
+                float(np.median(row_x[:first_count])),
+                float(np.median(row_x[-last_count:])),
+                first_slope,
+                last_slope,
+            ))
+
+        # For every fragment, find the most plausible continuation below it;
+        # only reciprocal best matches are joined, which helps keep parallel
+        # contour lines separate.
+        next_match: dict[int, tuple[int, float]] = {}
+        previous_match: dict[int, tuple[int, float]] = {}
+        for first, (_first_top, first_bottom, _first_x_top, first_x_bottom, _first_slope_top, first_slope_bottom) in enumerate(bounds):
+            best: tuple[int, float] | None = None
+            for second, (second_top, _second_bottom, second_x_top, _second_x_bottom, second_slope_top, _second_slope_bottom) in enumerate(bounds):
+                gap = second_top - first_bottom
+                if gap <= 0 or gap > 100:
+                    continue
+                predicted_x = first_x_bottom + first_slope_bottom * gap
+                residual = abs(second_x_top - predicted_x)
+                slope_delta = abs(first_slope_bottom - second_slope_top)
+                if residual > max(5.0, gap * 0.35 + 3.0) or slope_delta > 1.25:
+                    continue
+                score = residual + slope_delta * 3.0 + gap * 0.03
+                if best is None or score < best[1]:
+                    best = (second, score)
+                candidate = (first, score)
+                if second not in previous_match or score < previous_match[second][1]:
+                    previous_match[second] = candidate
+            if best is not None:
+                next_match[first] = best
+
+        for first, (second, score) in next_match.items():
+            reverse = previous_match.get(second)
+            if reverse is not None and reverse[0] == first and reverse[1] == score:
+                union(first, second)
+
+        groups: dict[int, list[int]] = {}
+        for index in range(count):
+            groups.setdefault(find(index), []).append(index)
+        joined: list[tuple[np.ndarray, np.ndarray]] = []
+        for indices in groups.values():
+            ys = np.concatenate([fragments[i][0] for i in indices])
+            xs = np.concatenate([fragments[i][1] for i in indices])
+            joined.append((ys, xs))
+        joined.sort(key=lambda line: (float(np.median(line[1])), float(np.median(line[0]))))
+        return joined
+
+    def _contour_color_mask(self, rgb: np.ndarray) -> np.ndarray:
+        """Match the chosen hue while allowing antialiased changes in brightness."""
+        normalized = np.asarray(rgb, dtype=np.float32) / 255.0
+        target = np.asarray(self.contour_color, dtype=np.float32).reshape(1, 1, 3) / 255.0
+        image_hsv = rgb_to_hsv(normalized)
+        target_hsv = rgb_to_hsv(target)[0, 0]
+        hue_delta = np.abs(image_hsv[..., 0] - target_hsv[0])
+        hue_delta = np.minimum(hue_delta, 1.0 - hue_delta)
+        tolerance = self.contour_tolerance.get()
+        hue_tolerance = float(np.clip(tolerance / 255.0 * 0.25, 0.025, 0.12))
+        minimum_saturation = max(0.08, float(target_hsv[1]) * 0.15)
+        return (hue_delta <= hue_tolerance) & (image_hsv[..., 1] >= minimum_saturation) & (image_hsv[..., 2] >= 0.12)
 
     def _update_manual_controls(self) -> None:
         count = len(self.contour_components)
@@ -495,10 +589,8 @@ class ReliefApp:
             assert self.color_image is not None
             rgb_small = self.color_image.copy()
             rgb_small.thumbnail((self.MAX_SIDE, self.MAX_SIDE), Image.Resampling.LANCZOS)
-            rgb_array = np.asarray(rgb_small, dtype=np.int16)
-            target = np.asarray(self.contour_color, dtype=np.int16)
-            delta = rgb_array - target
-            selected = np.sum(delta * delta, axis=2) <= self.contour_tolerance.get() ** 2
+            rgb_array = np.asarray(rgb_small, dtype=np.float32)
+            selected = self._contour_color_mask(rgb_array)
             if not selected.any():
                 messagebox.showwarning("No contour pixels found", "Try a higher color tolerance or choose a color present in the image.", parent=self.root)
                 return
