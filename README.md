@@ -26,3 +26,6 @@ After choosing a contour color, the app links nearby contour fragments when thei
 The interval prompt accepts a positive number or a blank value. A supplied interval scales the vertical relief in meters in either mode; the elevation slider remains a vertical exaggeration control. Supplying an interval starts the elevation slider at `1×` so the interval is visible immediately. Leaving the interval blank uses relative scale and preserves the flat-on-load behavior. Distance alone cannot determine whether terrain rises or falls across a contour, recover absolute elevations, or interpret contour labels. This method produces an approximate proximity-based relief rather than a surveyed elevation model.
 
 The display resolution is reduced automatically to keep interaction smooth. Drag over the plot to rotate the view; scroll up to zoom in and down to zoom out.
+
+## Demo
+- Demo-5.png: Black background, select color : 214,120,53
