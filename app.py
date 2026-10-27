@@ -1,6 +1,8 @@
 """Turn an image into an interactive 3D relief surface."""
 from __future__ import annotations
 
+import copy
+import json
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 from pathlib import Path
@@ -9,8 +11,69 @@ import numpy as np
 from PIL import Image, ImageFilter, ImageOps, ImageTk
 from scipy import ndimage
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.colors import rgb_to_hsv
+from matplotlib.colors import is_color_like, rgb_to_hsv
 from matplotlib.figure import Figure
+
+
+DEFAULT_CONFIG = {
+    "background": {"light": "#f5f7fa", "black": "#000000"},
+    "display": {"max_side": 220, "height_smoothing": 5.0},
+    "elevation": {"slider_max": 100, "initial_with_contour_interval": 1.0},
+    "contours": {
+        "color_tolerance": 35,
+        "color_tolerance_max": 150,
+        "minimum_component_pixels": 12,
+        "closing_size": 3,
+        "stitch_max_gap_px": 160,
+        "stitch_residual_min_px": 8.0,
+        "stitch_residual_gap_ratio": 0.6,
+        "stitch_residual_extra_px": 5.0,
+        "stitch_max_slope_delta": 2.0,
+        "stitch_slope_weight": 2.0,
+        "stitch_gap_weight": 0.02,
+        "hue_tolerance_scale": 0.25,
+        "hue_tolerance_min": 0.025,
+        "hue_tolerance_max": 0.12,
+        "minimum_saturation_target_fraction": 0.15,
+        "minimum_saturation_floor": 0.08,
+    },
+}
+
+
+def load_config() -> dict:
+    """Read config.json and fill any omitted options with built-in defaults."""
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    config_path = Path(__file__).with_name("config.json")
+    try:
+        user_config = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return config
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read {config_path.name}: {exc}") from exc
+    if not isinstance(user_config, dict):
+        raise ValueError("config.json must contain a JSON object")
+    for section, values in user_config.items():
+        if section in config and isinstance(values, dict):
+            config[section].update(values)
+    for key in ("light", "black"):
+        if not is_color_like(config["background"].get(key)):
+            config["background"][key] = DEFAULT_CONFIG["background"][key]
+    config["display"]["max_side"] = max(32, int(config["display"]["max_side"]))
+    config["display"]["height_smoothing"] = max(0.0, float(config["display"]["height_smoothing"]))
+    config["elevation"]["slider_max"] = max(1, int(config["elevation"]["slider_max"]))
+    config["elevation"]["initial_with_contour_interval"] = max(0.0, float(config["elevation"]["initial_with_contour_interval"]))
+    config["contours"]["color_tolerance"] = max(0, int(config["contours"]["color_tolerance"]))
+    config["contours"]["color_tolerance_max"] = max(1, int(config["contours"]["color_tolerance_max"]))
+    for key in ("minimum_component_pixels", "closing_size", "stitch_max_gap_px"):
+        config["contours"][key] = max(1, int(config["contours"][key]))
+    for key in (
+        "stitch_residual_min_px", "stitch_residual_gap_ratio", "stitch_residual_extra_px",
+        "stitch_max_slope_delta", "stitch_slope_weight", "stitch_gap_weight",
+        "hue_tolerance_scale", "hue_tolerance_min", "hue_tolerance_max",
+        "minimum_saturation_target_fraction", "minimum_saturation_floor",
+    ):
+        config["contours"][key] = max(0.0, float(config["contours"][key]))
+    return config
 
 
 class ReliefApp:
@@ -19,6 +82,14 @@ class ReliefApp:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
+        try:
+            self.config = load_config()
+        except (ValueError, TypeError) as exc:
+            messagebox.showwarning("Invalid configuration", f"{exc}\nUsing built-in defaults.", parent=root)
+            self.config = copy.deepcopy(DEFAULT_CONFIG)
+        self.MAX_SIDE = self.config["display"]["max_side"]
+        self.HEIGHT_SMOOTHING = self.config["display"]["height_smoothing"]
+        self.background_colors = self.config["background"]
         root.title("Image to 3D Relief")
         root.geometry("1100x760")
         root.minsize(760, 560)
@@ -30,7 +101,7 @@ class ReliefApp:
         self.invert_elevation = tk.BooleanVar(value=False)
         self.contour_color: tuple[int, int, int] | None = None
         self.contour_interval: float | None = None
-        self.contour_tolerance = tk.IntVar(value=35)
+        self.contour_tolerance = tk.IntVar(value=self.config["contours"]["color_tolerance"])
         self.contour_components: list[tuple[np.ndarray, np.ndarray]] = []
         self.selected_contour_index = 0
         self.manual_contour_values: dict[int, float] = {}
@@ -59,7 +130,7 @@ class ReliefApp:
         controls = ttk.Frame(outer)
         controls.pack(fill="x", pady=(0, 10))
         ttk.Label(controls, text="Elevation", font=("TkDefaultFont", 11, "bold")).pack(side="left", padx=(0, 10))
-        self.slider = ttk.Scale(controls, from_=0, to=100, variable=self.elevation, command=self._slider_changed)
+        self.slider = ttk.Scale(controls, from_=0, to=self.config["elevation"]["slider_max"], variable=self.elevation, command=self._slider_changed)
         self.slider.pack(side="left", fill="x", expand=True, padx=6)
         self.value_label = ttk.Label(controls, text="0.00×", width=7, anchor="e")
         self.value_label.pack(side="left", padx=(8, 0))
@@ -76,7 +147,7 @@ class ReliefApp:
         self.sample_color_button = ttk.Button(contour, text="Pick from image…", command=self._pick_color_from_image, state="disabled")
         self.sample_color_button.pack(side="left", padx=(6, 0))
         ttk.Label(contour, text="Color tolerance").pack(side="left", padx=(12, 4))
-        self.tolerance_slider = ttk.Scale(contour, from_=0, to=150, variable=self.contour_tolerance, command=self._tolerance_changed)
+        self.tolerance_slider = ttk.Scale(contour, from_=0, to=self.config["contours"]["color_tolerance_max"], variable=self.contour_tolerance, command=self._tolerance_changed)
         self.tolerance_slider.pack(side="left", fill="x", expand=True, padx=4)
         self.tolerance_label = ttk.Label(contour, text="35", width=4, anchor="e")
         self.tolerance_label.pack(side="left")
@@ -142,7 +213,7 @@ class ReliefApp:
             self._render_surface()
 
     def _apply_plot_background(self) -> None:
-        background = "#000000" if self.black_background.get() else "#f5f7fa"
+        background = self.background_colors["black"] if self.black_background.get() else self.background_colors["light"]
         self.fig.set_facecolor(background)
         self.ax.set_facecolor(background)
         if self.black_background.get():
@@ -199,7 +270,7 @@ class ReliefApp:
             self._refresh_contour_components()
             # A supplied contour interval should have a visible effect on load.
             # Blank intervals retain the original flat-on-load behavior.
-            initial_elevation = 1.0 if self.contour_interval is not None else 0.0
+            initial_elevation = self.config["elevation"]["initial_with_contour_interval"] if self.contour_interval is not None else 0.0
             self.elevation.set(initial_elevation)
             self.value_label.configure(text=f"{initial_elevation:.2f}×")
             self.file_label.configure(text=f"{Path(path).name}  ·  {self.image.width} × {self.image.height} px")
@@ -320,14 +391,15 @@ class ReliefApp:
             mask = self._contour_color_mask(rgb)
             # Close only tiny raster gaps here. Longer breaks (often where
             # elevation labels cover a contour) are linked by endpoint tracking below.
-            mask = ndimage.binary_closing(mask, structure=np.ones((3, 3), dtype=bool))
+            closing_size = self.config["contours"]["closing_size"]
+            mask = ndimage.binary_closing(mask, structure=np.ones((closing_size, closing_size), dtype=bool))
             labels, _ = ndimage.label(mask, structure=np.ones((3, 3), dtype=bool))
             fragments: list[tuple[np.ndarray, np.ndarray]] = []
             for label_id, bounds in enumerate(ndimage.find_objects(labels), start=1):
                 if bounds is None:
                     continue
                 ys, xs = np.where(labels[bounds] == label_id)
-                if len(xs) < 12:
+                if len(xs) < self.config["contours"]["minimum_component_pixels"]:
                     continue
                 ys = ys + bounds[0].start
                 xs = xs + bounds[1].start
@@ -341,8 +413,8 @@ class ReliefApp:
             self.selected_contour_index = 0
         self._update_manual_controls()
 
-    @staticmethod
     def _join_contour_fragments(
+        self,
         fragments: list[tuple[np.ndarray, np.ndarray]],
     ) -> list[tuple[np.ndarray, np.ndarray]]:
         """Join broken contour segments when their nearby endpoints continue smoothly."""
@@ -391,14 +463,26 @@ class ReliefApp:
             best: tuple[int, float] | None = None
             for second, (second_top, _second_bottom, second_x_top, _second_x_bottom, second_slope_top, _second_slope_bottom) in enumerate(bounds):
                 gap = second_top - first_bottom
-                if gap <= 0 or gap > 100:
+                if gap <= 0 or gap > self.config["contours"]["stitch_max_gap_px"]:
                     continue
                 predicted_x = first_x_bottom + first_slope_bottom * gap
                 residual = abs(second_x_top - predicted_x)
                 slope_delta = abs(first_slope_bottom - second_slope_top)
-                if residual > max(5.0, gap * 0.35 + 3.0) or slope_delta > 1.25:
+                # A contour can bend beneath an elevation label, so allow its
+                # local tangent to change while still requiring the predicted
+                # endpoint to remain closer than competing parallel lines.
+                max_residual = max(
+                    self.config["contours"]["stitch_residual_min_px"],
+                    gap * self.config["contours"]["stitch_residual_gap_ratio"]
+                    + self.config["contours"]["stitch_residual_extra_px"],
+                )
+                if residual > max_residual or slope_delta > self.config["contours"]["stitch_max_slope_delta"]:
                     continue
-                score = residual + slope_delta * 3.0 + gap * 0.03
+                score = (
+                    residual
+                    + slope_delta * self.config["contours"]["stitch_slope_weight"]
+                    + gap * self.config["contours"]["stitch_gap_weight"]
+                )
                 if best is None or score < best[1]:
                     best = (second, score)
                 candidate = (first, score)
@@ -432,8 +516,15 @@ class ReliefApp:
         hue_delta = np.abs(image_hsv[..., 0] - target_hsv[0])
         hue_delta = np.minimum(hue_delta, 1.0 - hue_delta)
         tolerance = self.contour_tolerance.get()
-        hue_tolerance = float(np.clip(tolerance / 255.0 * 0.25, 0.025, 0.12))
-        minimum_saturation = max(0.08, float(target_hsv[1]) * 0.15)
+        hue_tolerance = float(np.clip(
+            tolerance / 255.0 * self.config["contours"]["hue_tolerance_scale"],
+            self.config["contours"]["hue_tolerance_min"],
+            self.config["contours"]["hue_tolerance_max"],
+        ))
+        minimum_saturation = max(
+            self.config["contours"]["minimum_saturation_floor"],
+            float(target_hsv[1]) * self.config["contours"]["minimum_saturation_target_fraction"],
+        )
         return (hue_delta <= hue_tolerance) & (image_hsv[..., 1] >= minimum_saturation) & (image_hsv[..., 2] >= 0.12)
 
     def _update_manual_controls(self) -> None:

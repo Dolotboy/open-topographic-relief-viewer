@@ -27,5 +27,9 @@ The interval prompt accepts a positive number or a blank value. A supplied inter
 
 The display resolution is reduced automatically to keep interaction smooth. Drag over the plot to rotate the view; scroll up to zoom in and down to zoom out.
 
+## Configuration
+
+Edit `config.json` beside `app.py` and restart the app to apply changes. Colors use CSS hex notation. `elevation.slider_max` sets the elevation slider's maximum. Under `contours`, `color_tolerance` is the starting slider value and `color_tolerance_max` its maximum; `minimum_component_pixels` filters tiny detections and `closing_size` joins very small pixel gaps. The `stitch_*` settings control how far apart contour fragments may be, how much their predicted position and direction may differ, and how candidates are ranked. `hue_tolerance_*` and `minimum_saturation_*` tune color matching. `display.max_side` and `display.height_smoothing` adjust mesh resolution and smoothing.
+
 ## Demo
 - Demo-5.png: Black background, select color : 214,120,53

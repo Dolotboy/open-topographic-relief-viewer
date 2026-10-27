@@ -1,0 +1,32 @@
+{
+  "background": {
+    "light": "#f5f7fa",
+    "black": "#000000"
+  },
+  "display": {
+    "max_side": 220,
+    "height_smoothing": 5.0
+  },
+  "elevation": {
+    "slider_max": 100,
+    "initial_with_contour_interval": 1.0
+  },
+  "contours": {
+    "color_tolerance": 35,
+    "color_tolerance_max": 150,
+    "minimum_component_pixels": 12,
+    "closing_size": 3,
+    "stitch_max_gap_px": 160,
+    "stitch_residual_min_px": 8.0,
+    "stitch_residual_gap_ratio": 0.6,
+    "stitch_residual_extra_px": 5.0,
+    "stitch_max_slope_delta": 2.0,
+    "stitch_slope_weight": 2.0,
+    "stitch_gap_weight": 0.02,
+    "hue_tolerance_scale": 0.25,
+    "hue_tolerance_min": 0.025,
+    "hue_tolerance_max": 0.12,
+    "minimum_saturation_target_fraction": 0.15,
+    "minimum_saturation_floor": 0.08
+  }
+}
