@@ -405,8 +405,17 @@ class ReliefApp:
                 xs = xs + bounds[1].start
                 fragments.append((ys.astype(np.int32), xs.astype(np.int32)))
             self.contour_components = self._join_contour_fragments(fragments)
-        if previous_count and len(self.contour_components) != previous_count:
+        line_count_changed = previous_count != len(self.contour_components)
+        if previous_count and line_count_changed:
             self.manual_contour_values.clear()
+        if self.contour_components and self.contour_interval is not None and (
+            line_count_changed or not self.manual_contour_values
+        ):
+            interval = self.contour_interval
+            self.manual_contour_values = {
+                line_number: line_number * interval
+                for line_number in range(1, len(self.contour_components) + 1)
+            }
         if self.contour_components:
             self.selected_contour_index = min(self.selected_contour_index, len(self.contour_components) - 1)
         else:
