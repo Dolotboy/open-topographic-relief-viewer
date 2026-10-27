@@ -6,7 +6,7 @@ from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageFilter, ImageOps
+from PIL import Image, ImageFilter, ImageOps, ImageTk
 from scipy import ndimage
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
@@ -72,6 +72,8 @@ class ReliefApp:
         contour.pack(fill="x", pady=(0, 8))
         self.contour_button = ttk.Button(contour, text="Choose contour color…", command=self._choose_contour_color)
         self.contour_button.pack(side="left")
+        self.sample_color_button = ttk.Button(contour, text="Pick from image…", command=self._pick_color_from_image, state="disabled")
+        self.sample_color_button.pack(side="left", padx=(6, 0))
         ttk.Label(contour, text="Color tolerance").pack(side="left", padx=(12, 4))
         self.tolerance_slider = ttk.Scale(contour, from_=0, to=150, variable=self.contour_tolerance, command=self._tolerance_changed)
         self.tolerance_slider.pack(side="left", fill="x", expand=True, padx=4)
@@ -190,6 +192,7 @@ class ReliefApp:
                 self.image = ImageOps.grayscale(flattened).copy()
                 self.color_image = flattened.copy()
             self.filename = path
+            self.sample_color_button.configure(state="normal")
             self.manual_contour_values.clear()
             self.selected_contour_index = 0
             self._refresh_contour_components()
@@ -207,14 +210,98 @@ class ReliefApp:
         result = colorchooser.askcolor(title="Choose the contour-line color", parent=self.root)
         if result[0] is None:
             return
-        self.contour_color = tuple(int(round(channel)) for channel in result[0])
-        self.contour_button.configure(text=f"Contour color: {result[1]}")
+        self._set_contour_color(tuple(int(round(channel)) for channel in result[0]), result[1])
+
+    def _set_contour_color(self, color: tuple[int, int, int], label: str) -> None:
+        self.contour_color = color
+        self.contour_button.configure(text=f"Contour color: {label}")
         self.contour_label.configure(text="Selected pixels define the contour distance field")
         if self.image is not None:
             self.manual_contour_values.clear()
             self.selected_contour_index = 0
             self._refresh_contour_components()
             self._render_surface()
+
+    def _pick_color_from_image(self) -> None:
+        if self.color_image is None:
+            return
+        picker = tk.Toplevel(self.root)
+        picker.title("Pick contour color from image")
+        picker.transient(self.root)
+        picker.geometry("1100x780")
+        picker.columnconfigure(0, weight=1)
+        picker.rowconfigure(1, weight=1)
+        initial_scale = min(1.0, 1000 / self.color_image.width, 650 / self.color_image.height)
+        zoom = [initial_scale]
+        preview_width = max(1, round(self.color_image.width * zoom[0]))
+        preview_height = max(1, round(self.color_image.height * zoom[0]))
+        preview = self.color_image.resize((preview_width, preview_height), Image.Resampling.LANCZOS)
+        photo = ImageTk.PhotoImage(preview)
+        photo_ref = [photo]
+        controls = ttk.Frame(picker, padding=(8, 6))
+        controls.grid(row=0, column=0, columnspan=2, sticky="ew")
+        canvas = tk.Canvas(picker, background="#222", highlightthickness=0, cursor="crosshair", width=1000, height=650)
+        canvas.grid(row=1, column=0, sticky="nsew")
+        vertical_scroll = ttk.Scrollbar(picker, orient="vertical", command=canvas.yview)
+        vertical_scroll.grid(row=1, column=1, sticky="ns")
+        horizontal_scroll = ttk.Scrollbar(picker, orient="horizontal", command=canvas.xview)
+        horizontal_scroll.grid(row=2, column=0, sticky="ew")
+        canvas.configure(xscrollcommand=horizontal_scroll.set, yscrollcommand=vertical_scroll.set)
+        image_item = canvas.create_image(0, 0, anchor="nw", image=photo_ref[0])
+        canvas.configure(scrollregion=(0, 0, preview_width, preview_height))
+        zoom_label = ttk.Label(controls, text=f"{zoom[0] * 100:.0f}%")
+        zoom_label.pack(side="left", padx=8)
+        ttk.Label(controls, text="Use the wheel or +/− to zoom; click a contour to sample its color").pack(side="left", padx=12)
+
+        def set_zoom(new_zoom: float, anchor_x: float, anchor_y: float) -> None:
+            old_width = max(1, round(self.color_image.width * zoom[0]))
+            old_height = max(1, round(self.color_image.height * zoom[0]))
+            image_x = canvas.canvasx(anchor_x) * self.color_image.width / old_width
+            image_y = canvas.canvasy(anchor_y) * self.color_image.height / old_height
+            zoom[0] = min(initial_scale * 12, max(initial_scale * 0.25, new_zoom))
+            new_width = max(1, round(self.color_image.width * zoom[0]))
+            new_height = max(1, round(self.color_image.height * zoom[0]))
+            resized = self.color_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            photo_ref[0] = ImageTk.PhotoImage(resized)
+            canvas.itemconfigure(image_item, image=photo_ref[0])
+            canvas.configure(scrollregion=(0, 0, new_width, new_height))
+            canvas.update_idletasks()
+            max_x = max(0, new_width - canvas.winfo_width())
+            max_y = max(0, new_height - canvas.winfo_height())
+            canvas.xview_moveto(min(1, max(0, image_x * zoom[0] - anchor_x) / max(1, new_width)))
+            canvas.yview_moveto(min(1, max(0, image_y * zoom[0] - anchor_y) / max(1, new_height)))
+            # Clamp view offsets after zooming near an image edge.
+            canvas.xview_moveto(min(max_x, max(0, canvas.canvasx(0))) / max(1, new_width))
+            canvas.yview_moveto(min(max_y, max(0, canvas.canvasy(0))) / max(1, new_height))
+            zoom_label.configure(text=f"{zoom[0] / initial_scale * 100:.0f}%")
+
+        def zoom_button(multiplier: float) -> None:
+            set_zoom(zoom[0] * multiplier, canvas.winfo_width() / 2, canvas.winfo_height() / 2)
+
+        ttk.Button(controls, text="−", width=3, command=lambda: zoom_button(1 / 1.25)).pack(side="left")
+        ttk.Button(controls, text="+", width=3, command=lambda: zoom_button(1.25)).pack(side="left", padx=(4, 0))
+        ttk.Button(controls, text="Fit", command=lambda: set_zoom(initial_scale, 0, 0)).pack(side="left", padx=(4, 0))
+
+        def on_wheel(event: tk.Event) -> None:
+            delta = getattr(event, "delta", 0)
+            direction = 1 if delta > 0 or getattr(event, "num", None) == 4 else -1
+            if delta or getattr(event, "num", None) in (4, 5):
+                set_zoom(zoom[0] * (1.25 if direction > 0 else 1 / 1.25), event.x, event.y)
+
+        canvas.bind("<MouseWheel>", on_wheel)
+        canvas.bind("<Button-4>", on_wheel)
+        canvas.bind("<Button-5>", on_wheel)
+
+        def sample(event: tk.Event) -> None:
+            x = int(canvas.canvasx(event.x) * self.color_image.width / max(1, round(self.color_image.width * zoom[0])))
+            y = int(canvas.canvasy(event.y) * self.color_image.height / max(1, round(self.color_image.height * zoom[0])))
+            if not (0 <= x < self.color_image.width and 0 <= y < self.color_image.height):
+                return
+            color = self.color_image.getpixel((x, y))
+            self._set_contour_color(color, "#%02x%02x%02x" % color)
+            picker.destroy()
+
+        canvas.bind("<Button-1>", sample)
 
     def _tolerance_changed(self, _value: str) -> None:
         tolerance = int(round(self.contour_tolerance.get()))
@@ -273,11 +360,15 @@ class ReliefApp:
         if self.contour_components:
             self.selected_contour_index = (self.selected_contour_index - 1) % len(self.contour_components)
             self._update_manual_controls()
+            if self.image is not None:
+                self._render_surface()
 
     def _next_contour(self) -> None:
         if self.contour_components:
             self.selected_contour_index = (self.selected_contour_index + 1) % len(self.contour_components)
             self._update_manual_controls()
+            if self.image is not None:
+                self._render_surface()
 
     def _manual_value_changed(self, *_args: object) -> None:
         if self._updating_manual_value or not self.contour_components:
@@ -437,6 +528,21 @@ class ReliefApp:
         Z = height_map * self.elevation.get() * min(width, height) * 0.02 * vertical_unit
         # plot_surface assigns one colour to each quad, so average its corners.
         facecolors = (colors[:-1, :-1] + colors[1:, :-1] + colors[:-1, 1:] + colors[1:, 1:]) / 4
+        if self.contour_components:
+            # Highlight the active detected contour in vivid pink on the mesh.
+            source_ys, source_xs = self.contour_components[self.selected_contour_index]
+            source_height, source_width = self.color_image.size[1], self.color_image.size[0]
+            line_mask = np.zeros((height, width), dtype=bool)
+            scaled_y = np.rint(source_ys * (height - 1) / max(1, source_height - 1)).astype(np.int32)
+            scaled_x = np.rint(source_xs * (width - 1) / max(1, source_width - 1)).astype(np.int32)
+            line_mask[scaled_y, scaled_x] = True
+            selected_faces = (
+                line_mask[:-1, :-1]
+                | line_mask[1:, :-1]
+                | line_mask[:-1, 1:]
+                | line_mask[1:, 1:]
+            )
+            facecolors[selected_faces] = (1.0, 0.0, 0.72)
         self.ax.clear()
         self._apply_plot_background()
         self.ax.plot_surface(X, Y, Z, facecolors=facecolors, rstride=1, cstride=1, linewidth=0, antialiased=True, shade=False)
