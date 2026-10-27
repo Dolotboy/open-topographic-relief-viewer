@@ -277,10 +277,10 @@ class ReliefApp:
         X, Y = np.meshgrid(x, y)
         # The slider controls vertical exaggeration relative to the map size.
         height_map = 1.0 - pixels if self.invert_elevation.get() else pixels
-        if self.contour_color is not None and self.contour_interval is not None:
-            Z = height_map * self.elevation.get() * self.contour_interval
-        else:
-            Z = height_map * self.elevation.get() * min(width, height) * 0.02
+        # Keep the image-size based relief scale, then calibrate it by the
+        # supplied contour interval (the same multiplier works in either mode).
+        vertical_unit = self.contour_interval or 1.0
+        Z = height_map * self.elevation.get() * min(width, height) * 0.02 * vertical_unit
         # plot_surface assigns one colour to each quad, so average its corners.
         facecolors = (colors[:-1, :-1] + colors[1:, :-1] + colors[:-1, 1:] + colors[1:, 1:]) / 4
         self.ax.clear()
